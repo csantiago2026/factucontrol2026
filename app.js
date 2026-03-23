@@ -319,7 +319,7 @@ async function startProcessing() {
 // GEMINI API
 // ===========================
 async function extractWithGemini(pdfBase64) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(state.geminiKey)}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${encodeURIComponent(state.geminiKey)}`;
     const prompt = `Analiza este documento PDF adjunto que es una factura de una empresa. Extrae los siguientes datos y devuelve un objeto JSON válido.
     {
       "fecha": "DD/MM/YYYY",

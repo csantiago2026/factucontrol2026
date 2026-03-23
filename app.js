@@ -224,30 +224,33 @@ async function blobToBase64(blob) {
 // Auto-detect the best available Model for the user's specific API key
 async function getBestModel() {
     if (state.dynamicModel) return state.dynamicModel;
+
     try {
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(state.geminiKey)}`);
         const data = await res.json();
+
         if (data.models) {
-            const names = data.models.map(m => m.name.replace('models/', ''));
-            console.log("INFO IA: Modelos detectados como disponibles para tu API Key:", names);
-            
-            if (names.includes("gemini-1.5-flash")) state.dynamicModel = "gemini-1.5-flash";
-            else if (names.includes("gemini-1.5-pro")) state.dynamicModel = "gemini-1.5-pro";
+            // 🔥 SOLO modelos que sirven
+            const usable = data.models.filter(m =>
+                m.supportedGenerationMethods &&
+                m.supportedGenerationMethods.includes("generateContent")
+            );
+
+            const names = usable.map(m => m.name.replace('models/', ''));
+            console.log("Modelos válidos:", names);
+
+            // 🔥 PRIORIDAD CORRECTA
+            if (names.includes("gemini-1.5-pro-latest")) state.dynamicModel = "gemini-1.5-pro-latest";
             else if (names.includes("gemini-1.5-flash-latest")) state.dynamicModel = "gemini-1.5-flash-latest";
-            else if (names.includes("gemini-1.5-flash-8b")) state.dynamicModel = "gemini-1.5-flash-8b";
-            else if (names.includes("gemini-1.5-pro-latest")) state.dynamicModel = "gemini-1.5-pro-latest";
-            else if (names.includes("gemini-pro")) state.dynamicModel = "gemini-pro";
-            
-            if(state.dynamicModel) {
-                console.log("INFO IA: Optimizando auto-selección usando:", state.dynamicModel);
-                return state.dynamicModel;
-            }
+            else if (names.includes("gemini-flash-latest")) state.dynamicModel = "gemini-flash-latest";
+            else if (names.length > 0) state.dynamicModel = names[0];
         }
     } catch(e) {
-        console.error("Warning: Falló auto-detección de modelos", e);
+        console.error("Error detectando modelos", e);
     }
-    // Fallback absoluto por defecto 
-    state.dynamicModel = "gemini-1.5-flash";
+
+    // 🔥 fallback correcto
+    state.dynamicModel = "gemini-1.5-flash-latest";
     return state.dynamicModel;
 }
 

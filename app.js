@@ -76,20 +76,25 @@ function init() {
     dom.ccFile.addEventListener('change', handleCCFileUpload);
     dom.processBtn.addEventListener('click', startProcessing);
     dom.exportBtn.addEventListener('click', exportCSV);
-
-    if (window['pdfjs-dist/build/pdf']) {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
-    }
 }
 
 // ===========================
 // SETTINGS
 // ===========================
+function extractDriveId(input) {
+    if (!input) return '';
+    let match = input.match(/folders\/([a-zA-Z0-9_-]+)/);
+    if (match) return match[1];
+    return input.split('?')[0].split('&')[0].trim();
+}
+
 function saveSettings() {
     state.clientId = dom.clientIdInp.value.trim();
     state.geminiKey = dom.geminiKeyInp.value.trim();
-    state.folderIn = dom.folderInInp.value.trim();
-    state.folderOut = dom.folderOutInp.value.trim();
+    state.folderIn = extractDriveId(dom.folderInInp.value);
+    dom.folderInInp.value = state.folderIn; // Update visual field
+    state.folderOut = extractDriveId(dom.folderOutInp.value);
+    dom.folderOutInp.value = state.folderOut; // Update visual field
     
     const ccLines = dom.ccText.value.split('\n')
         .map(l => l.trim())
@@ -207,6 +212,14 @@ async function getFolderIdByName(folderName) {
     return null;
 }
 
+async function blobToBase64(blob) {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result.split(',')[1]);
+        reader.readAsDataURL(blob);
+    });
+}
+
 // ===========================
 // MAIN PROCESS LOGIC
 // ===========================
@@ -266,19 +279,13 @@ async function startProcessing() {
             const pdfRes = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, {
                 headers: { 'Authorization': `Bearer ${state.accessToken}` }
             });
-            const arrayBuffer = await pdfRes.arrayBuffer();
+            const blob = await pdfRes.blob();
+            
+            // 2. Convert to Base64
+            const base64Pdf = await blobToBase64(blob);
 
-            // 2. Extract Text via PDF.js
-            const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
-            let textContent = "";
-            for (let p = 1; p <= pdf.numPages; p++) {
-                const page = await pdf.getPage(p);
-                const txt = await page.getTextContent();
-                textContent += txt.items.map(it => it.str).join(" ") + " ";
-            }
-
-            // 3. Gemini Extraction
-            let extData = await extractWithGemini(textContent);
+            // 3. Gemini Extraction (Native PDF Support)
+            let extData = await extractWithGemini(base64Pdf);
             if (!extData) extData = { fecha: '-', mes: '-', razon_social: 'No pudo extraerse', descripcion: '', tipo: '-', numero: '-', monto: '-' };
 
             // 4. Move file in Drive
@@ -308,31 +315,42 @@ async function startProcessing() {
 // ===========================
 // GEMINI API
 // ===========================
-async function extractWithGemini(pdfText) {
+async function extractWithGemini(pdfBase64) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${state.geminiKey}`;
-    const prompt = `Extrae de esta factura los siguientes datos y devuelve SOLAMENTE el JSON raw (sin markdown de código):
+    const prompt = `Analiza este documento PDF adjunto que es una factura comercial. Extrae los siguientes datos y devuelve SOLAMENTE un objeto JSON raw estricto y válido (sin formato markdown \`\`\`json ni texto extra):
     {
       "fecha": "DD/MM/YYYY",
       "mes": "Mes en español (ej: Enero)",
-      "razon_social": "Quien emite o a quien va dirigida",
-      "descripcion": "Motivo / Descripción de la factura",
-      "tipo": "A, B, C, N/C",
-      "numero": "Num exacto",
-      "monto": "Monto final (sin simbolos, ej: 15400.50)"
-    }
-    
-    Texto Factura:
-    ${pdfText.substring(0, 15000)}`;
+      "razon_social": "Quien emite o a quien va dirigida la factura",
+      "descripcion": "Breve motivo o descripción de la factura",
+      "tipo": "A, B, C o N/C (Nota de crédito)",
+      "numero": "Número exacto de la factura",
+      "monto": "Monto final total (un string numérico sin símbolos de moneda, con punto decimal, ej: 15400.50)"
+    }`;
 
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ contents: [{ parts: [{text: prompt}] }] })
+            body: JSON.stringify({
+                contents: [{
+                    parts: [
+                        { text: prompt },
+                        { inlineData: { mimeType: "application/pdf", data: pdfBase64 } }
+                    ]
+                }]
+            })
         });
+        
         const rJson = await response.json();
-        const rawText = rJson.candidates[0].content.parts[0].text;
-        const cleanJson = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+        if (rJson.error) {
+            console.error("Gemini API Error:", rJson.error);
+            return null;
+        }
+
+        let rawText = rJson.candidates[0].content.parts[0].text;
+        let cleanJson = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        if (cleanJson.startsWith('json')) cleanJson = cleanJson.substring(4).trim();
         return JSON.parse(cleanJson);
     } catch (e) {
         console.error("Gemini Parse Error:", e);

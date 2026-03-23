@@ -13,7 +13,8 @@ const state = {
     tokenClient: null,
     accessToken: null,
     invoicesData: [],
-    processedCount: 0
+    processedCount: 0,
+    dynamicModel: null
 };
 
 // ===========================
@@ -92,9 +93,9 @@ function saveSettings() {
     state.clientId = dom.clientIdInp.value.trim();
     state.geminiKey = dom.geminiKeyInp.value.trim();
     state.folderIn = extractDriveId(dom.folderInInp.value);
-    dom.folderInInp.value = state.folderIn;
+    dom.folderInInp.value = state.folderIn; 
     state.folderOut = extractDriveId(dom.folderOutInp.value);
-    dom.folderOutInp.value = state.folderOut;
+    dom.folderOutInp.value = state.folderOut; 
     
     const ccLines = dom.ccText.value.split('\n')
         .map(l => l.trim())
@@ -109,7 +110,7 @@ function saveSettings() {
 
     dom.saveMsg.classList.remove('hidden');
     setTimeout(() => dom.saveMsg.classList.add('hidden'), 3000);
-
+    state.dynamicModel = null; // reset to fetch models again if key changed
     if (state.clientId) initGoogleClient();
 }
 
@@ -220,6 +221,36 @@ async function blobToBase64(blob) {
     });
 }
 
+// Auto-detect the best available Model for the user's specific API key
+async function getBestModel() {
+    if (state.dynamicModel) return state.dynamicModel;
+    try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(state.geminiKey)}`);
+        const data = await res.json();
+        if (data.models) {
+            const names = data.models.map(m => m.name.replace('models/', ''));
+            console.log("INFO IA: Modelos detectados como disponibles para tu API Key:", names);
+            
+            if (names.includes("gemini-1.5-flash")) state.dynamicModel = "gemini-1.5-flash";
+            else if (names.includes("gemini-1.5-pro")) state.dynamicModel = "gemini-1.5-pro";
+            else if (names.includes("gemini-1.5-flash-latest")) state.dynamicModel = "gemini-1.5-flash-latest";
+            else if (names.includes("gemini-1.5-flash-8b")) state.dynamicModel = "gemini-1.5-flash-8b";
+            else if (names.includes("gemini-1.5-pro-latest")) state.dynamicModel = "gemini-1.5-pro-latest";
+            else if (names.includes("gemini-pro")) state.dynamicModel = "gemini-pro";
+            
+            if(state.dynamicModel) {
+                console.log("INFO IA: Optimizando auto-selección usando:", state.dynamicModel);
+                return state.dynamicModel;
+            }
+        }
+    } catch(e) {
+        console.error("Warning: Falló auto-detección de modelos", e);
+    }
+    // Fallback absoluto por defecto 
+    state.dynamicModel = "gemini-1.5-flash";
+    return state.dynamicModel;
+}
+
 // ===========================
 // MAIN PROCESS LOGIC
 // ===========================
@@ -275,26 +306,21 @@ async function startProcessing() {
             const f = files[i];
             setUIMessage(`Procesando ${i+1}/${files.length}...`, `Leyendo ${f.name}`, true);
             
-            // 1. Download PDF blob using standard fetch due to drive download rules
             const pdfRes = await fetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`, {
                 headers: { 'Authorization': `Bearer ${state.accessToken}` }
             });
             const blob = await pdfRes.blob();
-            
-            // 2. Convert to Base64
             const base64Pdf = await blobToBase64(blob);
 
-            // 3. Gemini Extraction (Native PDF Support)
             let extData = await extractWithGemini(base64Pdf);
             if (!extData || extData.error_debug) {
                 let reason = extData ? extData.error_debug : "Error desconocido";
-                extData = { fecha: '-', mes: '-', razon_social: `Error IA: ${reason.substring(0, 60)}`, descripcion: 'Revisa F12 (Consola)', tipo: '-', numero: '-', monto: '-' };
+                extData = { fecha: '-', mes: '-', razon_social: `${reason.substring(0, 60)}...`, descripcion: 'Revisa consola F12', tipo: '-', numero: '-', monto: '-' };
             }
 
-            // 4. Move file in Drive
+            // Mueve el archivo procesado a la carpeta destino
             await apiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?addParents=${state.folderOut}&removeParents=${state.folderIn}`, { method: 'PATCH' });
 
-            // 5. Update Table & UI
             addRowToTable(extData, f.webViewLink);
             state.processedCount++;
             dom.processedCount.textContent = state.processedCount;
@@ -309,7 +335,6 @@ async function startProcessing() {
         alert("Ocurrió un error en el proceso: " + err.message);
     }
     
-    // Check remaining
     setTimeout(() => {
         if(dom.pendingCount.textContent === '0') checkPendingInvoices();
     }, 1000);
@@ -319,26 +344,28 @@ async function startProcessing() {
 // GEMINI API
 // ===========================
 async function extractWithGemini(pdfBase64) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${encodeURIComponent(state.geminiKey)}`;
-    const prompt = `Analiza este documento PDF adjunto que es una factura de una empresa. Extrae los siguientes datos y devuelve un objeto JSON válido.
-    {
-      "fecha": "DD/MM/YYYY",
-      "mes": "Mes en español (ej: Enero)",
-      "razon_social": "Quien emite o a quien va dirigida la factura",
-      "descripcion": "Breve motivo o descripción de la factura",
-      "tipo": "A, B, C o N/C (Nota de crédito)",
-      "numero": "Número exacto de la factura",
-      "monto": "Monto final total (un string con números y punto, ej: 15400.50)"
-    }`;
+    const model = await getBestModel();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(state.geminiKey)}`;
+    
+    // Removidas las instrucciones complejas (system y config MIME estrico) que a veces fallan según la región o versión de API REST
+    const prompt = `Actúa como un extractor contable automatizado. Vas a leer el documento adjuntado (una factura o ticket). Tu ÚNICA respuesta debe ser el código JSON bruto y limpio sin texto adicional y válido.
+
+Extrae esto y devuelve el siguiente JSON tal cual (con los datos reales reemplazados):
+{
+  "fecha": "DD/MM/YYYY",
+  "mes": "Mes en español (ej: Enero)",
+  "razon_social": "Quien emite o recibe la factura (empresa principal)",
+  "descripcion": "Breve descripción",
+  "tipo": "A, B, C o N/C",
+  "numero": "000000",
+  "monto": "0.00"
+}`;
 
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                systemInstruction: { 
-                    parts: [{ text: "Responde UNICAMENTE en JSON y sin usar comillas triples ni backticks." }] 
-                },
                 contents: [{
                     parts: [
                         { text: prompt },
@@ -350,38 +377,36 @@ async function extractWithGemini(pdfBase64) {
                     { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
                     { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
                     { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" }
-                ],
-                generationConfig: {
-                    responseMimeType: "application/json"
-                }
+                ]
             })
         });
         
         const rJson = await response.json();
         if (rJson.error) {
-            console.error("Gemini API Error:", rJson.error);
-            return { error_debug: rJson.error.message };
+            console.error("Gemini API Error details:", rJson.error);
+            return { error_debug: "API Error: " + rJson.error.message };
         }
 
         if (!rJson.candidates || rJson.candidates.length === 0) {
-            console.error("No candidates, blocked?", rJson);
-            return { error_debug: "Bloqueo por protección de Safety/Filtros" };
+            console.error("No candidates, blocked or generic error", rJson);
+            return { error_debug: "Error Generativo: Bloqueado por Safety Filtros." };
         }
 
         let rawText = rJson.candidates[0].content.parts[0].text;
         
-        // Find JSON boundaries just to be completely immune to garbage wrappers
+        // Find inner JSON
         let startIndex = rawText.indexOf('{');
         let endIndex = rawText.lastIndexOf('}');
         if (startIndex !== -1 && endIndex !== -1) {
             let cleanJson = rawText.substring(startIndex, endIndex + 1);
             return JSON.parse(cleanJson);
         } else {
-            return { error_debug: "JSON Inválido devuelto por la IA" };
+            console.error("No JSON in string:", rawText);
+            return { error_debug: "El modelo no generó un JSON válido" };
         }
     } catch (e) {
         console.error("Gemini Catch Error:", e);
-        return { error_debug: e.message };
+        return { error_debug: "Error JS Interno: " + e.message };
     }
 }
 
@@ -391,7 +416,6 @@ async function extractWithGemini(pdfBase64) {
 function addRowToTable(data, url) {
     const tr = document.createElement('tr');
     
-    // Select dropdown for Cost Centers
     let ccOptions = state.costCenters.map(cc => `<option value="${cc}">${cc}</option>`).join('');
     
     let tipoBadge = 'type-a';
@@ -424,7 +448,7 @@ function exportCSV() {
         const cols = tr.querySelectorAll('td');
         const fecha = cols[0].innerText;
         const mes = cols[1].innerText;
-        const rs = `"${cols[2].innerText}"`; // Quotes to handle commas in description/Razon Social
+        const rs = `"${cols[2].innerText}"`; 
         const desc = `"${cols[3].innerText}"`;
         const tipo = cols[4].innerText;
         const num = cols[5].innerText;

@@ -286,7 +286,10 @@ async function startProcessing() {
 
             // 3. Gemini Extraction (Native PDF Support)
             let extData = await extractWithGemini(base64Pdf);
-            if (!extData) extData = { fecha: '-', mes: '-', razon_social: 'No pudo extraerse', descripcion: '', tipo: '-', numero: '-', monto: '-' };
+            if (!extData || extData.error_debug) {
+                let reason = extData ? extData.error_debug : "Error desconocido";
+                extData = { fecha: '-', mes: '-', razon_social: `Error IA: ${reason.substring(0,35)}...`, descripcion: 'Revisa F12 (Consola)', tipo: '-', numero: '-', monto: '-' };
+            }
 
             // 4. Move file in Drive
             await apiFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?addParents=${state.folderOut}&removeParents=${state.folderIn}`, { method: 'PATCH' });
@@ -317,7 +320,7 @@ async function startProcessing() {
 // ===========================
 async function extractWithGemini(pdfBase64) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${state.geminiKey}`;
-    const prompt = `Analiza este documento PDF adjunto que es una factura comercial. Extrae los siguientes datos y devuelve SOLAMENTE un objeto JSON raw estricto y válido (sin formato markdown \`\`\`json ni texto extra):
+    const prompt = `Analiza este documento PDF adjunto que es una factura comercial. Extrae los siguientes datos y devuelve un objeto JSON válido.
     {
       "fecha": "DD/MM/YYYY",
       "mes": "Mes en español (ej: Enero)",
@@ -325,7 +328,7 @@ async function extractWithGemini(pdfBase64) {
       "descripcion": "Breve motivo o descripción de la factura",
       "tipo": "A, B, C o N/C (Nota de crédito)",
       "numero": "Número exacto de la factura",
-      "monto": "Monto final total (un string numérico sin símbolos de moneda, con punto decimal, ej: 15400.50)"
+      "monto": "Monto final total (un string con números y punto, ej: 15400.50)"
     }`;
 
     try {
@@ -333,28 +336,52 @@ async function extractWithGemini(pdfBase64) {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
+                system_instruction: { 
+                    parts: [{ text: "Solo respondes en formato JSON impecable, nada de charlas ni backticks." }] 
+                },
                 contents: [{
                     parts: [
                         { text: prompt },
-                        { inlineData: { mimeType: "application/pdf", data: pdfBase64 } }
+                        { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }
                     ]
-                }]
+                }],
+                safetySettings: [
+                    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" }
+                ],
+                generationConfig: {
+                    response_mime_type: "application/json"
+                }
             })
         });
         
         const rJson = await response.json();
         if (rJson.error) {
             console.error("Gemini API Error:", rJson.error);
-            return null;
+            return { error_debug: rJson.error.message };
+        }
+
+        if (!rJson.candidates || rJson.candidates.length === 0) {
+            console.error("No candidates, blocked?", rJson);
+            return { error_debug: "Bloqueo por Safety o API" };
         }
 
         let rawText = rJson.candidates[0].content.parts[0].text;
-        let cleanJson = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
-        if (cleanJson.startsWith('json')) cleanJson = cleanJson.substring(4).trim();
-        return JSON.parse(cleanJson);
+        
+        // Find JSON boundaries just to be completely immune to garbage wrappers
+        let startIndex = rawText.indexOf('{');
+        let endIndex = rawText.lastIndexOf('}');
+        if (startIndex !== -1 && endIndex !== -1) {
+            let cleanJson = rawText.substring(startIndex, endIndex + 1);
+            return JSON.parse(cleanJson);
+        } else {
+            return { error_debug: "JSON Inválido" };
+        }
     } catch (e) {
         console.error("Gemini Parse Error:", e);
-        return null;
+        return { error_debug: e.message };
     }
 }
 

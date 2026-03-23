@@ -92,9 +92,9 @@ function saveSettings() {
     state.clientId = dom.clientIdInp.value.trim();
     state.geminiKey = dom.geminiKeyInp.value.trim();
     state.folderIn = extractDriveId(dom.folderInInp.value);
-    dom.folderInInp.value = state.folderIn; // Update visual field
+    dom.folderInInp.value = state.folderIn;
     state.folderOut = extractDriveId(dom.folderOutInp.value);
-    dom.folderOutInp.value = state.folderOut; // Update visual field
+    dom.folderOutInp.value = state.folderOut;
     
     const ccLines = dom.ccText.value.split('\n')
         .map(l => l.trim())
@@ -288,7 +288,7 @@ async function startProcessing() {
             let extData = await extractWithGemini(base64Pdf);
             if (!extData || extData.error_debug) {
                 let reason = extData ? extData.error_debug : "Error desconocido";
-                extData = { fecha: '-', mes: '-', razon_social: `Error IA: ${reason.substring(0,35)}...`, descripcion: 'Revisa F12 (Consola)', tipo: '-', numero: '-', monto: '-' };
+                extData = { fecha: '-', mes: '-', razon_social: `Error IA: ${reason.substring(0, 60)}`, descripcion: 'Revisa F12 (Consola)', tipo: '-', numero: '-', monto: '-' };
             }
 
             // 4. Move file in Drive
@@ -319,8 +319,8 @@ async function startProcessing() {
 // GEMINI API
 // ===========================
 async function extractWithGemini(pdfBase64) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${state.geminiKey}`;
-    const prompt = `Analiza este documento PDF adjunto que es una factura comercial. Extrae los siguientes datos y devuelve un objeto JSON válido.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(state.geminiKey)}`;
+    const prompt = `Analiza este documento PDF adjunto que es una factura de una empresa. Extrae los siguientes datos y devuelve un objeto JSON válido.
     {
       "fecha": "DD/MM/YYYY",
       "mes": "Mes en español (ej: Enero)",
@@ -336,13 +336,13 @@ async function extractWithGemini(pdfBase64) {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                system_instruction: { 
-                    parts: [{ text: "Solo respondes en formato JSON impecable, nada de charlas ni backticks." }] 
+                systemInstruction: { 
+                    parts: [{ text: "Responde UNICAMENTE en JSON y sin usar comillas triples ni backticks." }] 
                 },
                 contents: [{
                     parts: [
                         { text: prompt },
-                        { inline_data: { mime_type: "application/pdf", data: pdfBase64 } }
+                        { inlineData: { mimeType: "application/pdf", data: pdfBase64 } }
                     ]
                 }],
                 safetySettings: [
@@ -352,7 +352,7 @@ async function extractWithGemini(pdfBase64) {
                     { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" }
                 ],
                 generationConfig: {
-                    response_mime_type: "application/json"
+                    responseMimeType: "application/json"
                 }
             })
         });
@@ -365,7 +365,7 @@ async function extractWithGemini(pdfBase64) {
 
         if (!rJson.candidates || rJson.candidates.length === 0) {
             console.error("No candidates, blocked?", rJson);
-            return { error_debug: "Bloqueo por Safety o API" };
+            return { error_debug: "Bloqueo por protección de Safety/Filtros" };
         }
 
         let rawText = rJson.candidates[0].content.parts[0].text;
@@ -377,10 +377,10 @@ async function extractWithGemini(pdfBase64) {
             let cleanJson = rawText.substring(startIndex, endIndex + 1);
             return JSON.parse(cleanJson);
         } else {
-            return { error_debug: "JSON Inválido" };
+            return { error_debug: "JSON Inválido devuelto por la IA" };
         }
     } catch (e) {
-        console.error("Gemini Parse Error:", e);
+        console.error("Gemini Catch Error:", e);
         return { error_debug: e.message };
     }
 }

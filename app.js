@@ -59,10 +59,15 @@ function init() {
     dom.navBtns.forEach(btn => {
         btn.addEventListener('click', () => {
             dom.navBtns.forEach(b => b.classList.remove('active'));
-            dom.sections.forEach(s => s.classList.add('hidden'));
+            dom.sections.forEach(s => {
+                s.classList.remove('active');
+                s.classList.add('hidden');
+            });
             
             btn.classList.add('active');
-            document.getElementById(btn.dataset.target).classList.remove('hidden');
+            const targetSection = document.getElementById(btn.dataset.target);
+            targetSection.classList.remove('hidden');
+            targetSection.classList.add('active');
         });
     });
 
